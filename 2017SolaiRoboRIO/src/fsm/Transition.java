@@ -40,4 +40,8 @@ public abstract class Transition {
 	public TimeAccessor getTimeAccessor(){
 		return this.timeAccessor;
 	}
+	
+	public void setFutureState(State state){
+		this.futureState = state;
+	}
 }

@@ -2,17 +2,12 @@ package org.usfirst.frc.team5816.robot;
 
 import com.ctre.CANTalon;
 
-import edu.wpi.cscore.UsbCamera;
 import edu.wpi.first.wpilibj.ADXRS450_Gyro;
 import edu.wpi.first.wpilibj.AnalogInput;
 import edu.wpi.first.wpilibj.BuiltInAccelerometer;
 import edu.wpi.first.wpilibj.CameraServer;
 import edu.wpi.first.wpilibj.Compressor;
-import edu.wpi.first.wpilibj.DriverStation;
-import edu.wpi.first.wpilibj.DriverStation.Alliance;
 import edu.wpi.first.wpilibj.Encoder;
-import edu.wpi.first.wpilibj.I2C;
-import edu.wpi.first.wpilibj.I2C.Port;
 import edu.wpi.first.wpilibj.IterativeRobot;
 import edu.wpi.first.wpilibj.Joystick;
 import edu.wpi.first.wpilibj.PIDController;
@@ -22,19 +17,21 @@ import edu.wpi.first.wpilibj.PIDSourceType;
 import edu.wpi.first.wpilibj.SerialPort;
 import edu.wpi.first.wpilibj.Solenoid;
 import edu.wpi.first.wpilibj.interfaces.Gyro;
-import edu.wpi.first.wpilibj.smartdashboard.SendableChooser;
 import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
+
 import fsm.AllStatesSelector;
 import fsm.SingleStateSelector;
 import fsm.State;
-/**
- * @author Gregory Tracy 
- * @author Adam Naylor
- */
 import fsm.StateMachine;
 import fsm.TimeAccessor;
 import fsm.TimeTransition;
 import fsm.Transition;
+
+
+/**
+ * @author Gregory Tracy 
+ * @author Adam Naylor
+ */
 public class Robot extends IterativeRobot implements TimeAccessor{
 
 
@@ -61,8 +58,15 @@ public class Robot extends IterativeRobot implements TimeAccessor{
 	protected Long pixySightWatchdogCounter;
 	protected StateMachine autoStateMachine;
 	protected Long autoStartTime;
-	protected State autoCenter1, autoPlaceGear1, autoPlaceGear2, autoPlaceGear3, noState;
+	protected State autoCenter1, autoNoPressure, autoPlaceGear1, autoPlaceGear2, autoPlaceGear3, noState;
+	protected Transition autoHitWall;
 	protected BuiltInAccelerometer accelerometer;
+	
+	protected Boolean autoDriveEnabled;
+	protected Boolean autoGearKickEnabled;
+	protected Boolean autoHasPressure;
+	
+	protected Long teleopCount;
 
 	protected final Double TRIGGER_THRESHOLD = 0.5d;
 	protected final Double AUTO_CURRENT_THRESHOLD = 10.0d;
@@ -76,7 +80,11 @@ public class Robot extends IterativeRobot implements TimeAccessor{
 	protected final Double ENCODER_PID_D = 0.0d;
 	protected final Double ENCODER_PID_THRESHOLD = 1.0d;
 	protected final Double ENCODER_PID_SCALE = 0.35d;
-	protected final Double TURNING_CONST = 0.65d;
+	protected final Double TURNING_CONST = 0.70d;
+	protected final String AUTO_DRIVE_KEY = "Auto Drive";
+	protected final String AUTO_GEAR_KICK_KEY = "Auto Gear Kick";
+	protected final String AUTO_HAS_PRESSURE = "Has Pressure";
+	protected final Boolean SINGLE_CONTROLLER_MODE = true;
 
 
 
@@ -89,7 +97,7 @@ public class Robot extends IterativeRobot implements TimeAccessor{
 		this.leftMotor3 = new CANTalon(3);
 		this.rightMotor1 = new CANTalon(6);
 		this.rightMotor2 = new CANTalon(7);
-		this.rightMotor3 = new CANTalon(8);
+		this.rightMotor3 = new CANTalon(10);
 
 		this.winchMotor1 = new CANTalon(4);
 		this.winchMotor2 = new CANTalon(9);
@@ -104,7 +112,10 @@ public class Robot extends IterativeRobot implements TimeAccessor{
 
 		this.leftEncoder = new Encoder(0, 1, true);
 		this.rightEncoder = new Encoder(2, 3, true);
-
+		
+		this.setDriveCurrentLimit(50);
+		this.enableDriveCurrentLimit(false);
+		
 		this.pidInit();
 		
 		this.autoStateMachineInit();
@@ -116,13 +127,24 @@ public class Robot extends IterativeRobot implements TimeAccessor{
 		CameraServer.getInstance().startAutomaticCapture();
 		
 		this.accelerometer = new BuiltInAccelerometer();
+		
+		this.autoDriveEnabled = true;
+		this.autoGearKickEnabled = true;
+		this.autoHasPressure = true;
+		
+		SmartDashboard.putBoolean(this.AUTO_DRIVE_KEY, true);
+		SmartDashboard.putBoolean(this.AUTO_GEAR_KICK_KEY, true);
+		SmartDashboard.putBoolean(this.AUTO_HAS_PRESSURE, true);
 
 	}
 
 	@Override
 	public void robotPeriodic() {
 		this.setWinchBreaks(true);
-//		System.out.println(this.rightEncoder.getRate());
+		
+		this.autoDriveEnabled = SmartDashboard.getBoolean(this.AUTO_DRIVE_KEY, true);
+		this.autoGearKickEnabled = SmartDashboard.getBoolean(this.AUTO_GEAR_KICK_KEY, true);
+		this.autoHasPressure = SmartDashboard.getBoolean(this.AUTO_HAS_PRESSURE, true);
 	}
 
 
@@ -131,7 +153,8 @@ public class Robot extends IterativeRobot implements TimeAccessor{
 	@Override
 	public void autonomousInit() {
 		this.autoStartTime = System.currentTimeMillis();
-		this.autoStateMachine.setState(this.autoCenter1);
+		this.autoHitWall.setFutureState(this.autoGearKickEnabled ? (this.autoHasPressure ? this.autoPlaceGear1 : this.autoNoPressure) : this.noState);
+		this.autoStateMachine.setState(this.autoDriveEnabled ? this.autoCenter1 : this.noState);
 	}
 
 	@Override
@@ -144,15 +167,21 @@ public class Robot extends IterativeRobot implements TimeAccessor{
 
 	@Override
 	public void teleopInit() {
-
+		this.teleopCount = 0l;
 	}
 
 	@Override
 	public void teleopPeriodic() {
+		this.teleopCount++;
 		this.setDriveBreaks(true);
 		this.setWinchBreaks(true);
 		this.drive((this.getVerticleDriveInput() + this.getHorizontalDriveInput()) * (this.getSpeedModifierInput() ? 0.25d : 1.0d), (this.getVerticleDriveInput() - this.getHorizontalDriveInput()) * (this.getSpeedModifierInput() ? 0.25d : 1.0d));
-		this.gearSolenoid.set(this.getGearPlaceInput());
+		if(this.getPulseGearPlaceInput()){
+			this.gearSolenoid.set(((long)(this.teleopCount/2) % 4)!=0);
+		}else{
+			this.gearSolenoid.set(this.getGearPlaceInput());
+		}
+		
 		if(this.getFastWinchInput()){
 			this.winchDrive(1.0d);
 		}else if(this.getSlowWinchInput()){
@@ -161,7 +190,25 @@ public class Robot extends IterativeRobot implements TimeAccessor{
 			this.winchDrive(0.0d);
 		}
 	}
-
+	
+	
+	//	##### Test Main #####
+	@Override
+	public void testInit() {
+		
+	}
+	
+	@Override
+	public void testPeriodic() {
+		this.setDriveBreaks(true);
+		double speed = this.getVerticleDriveInput();
+		this.leftMotor1.set(this.driverController.getRawButton(1) ? speed : 0d);
+		this.leftMotor2.set(this.driverController.getRawButton(2) ? speed : 0d);
+		this.leftMotor3.set(this.driverController.getRawButton(3) ? speed : 0d);
+		this.rightMotor1.set(this.driverController.getRawButton(4) ? speed : 0d);
+		this.rightMotor2.set(this.driverController.getRawButton(5) ? speed : 0d);
+		this.rightMotor3.set(this.driverController.getRawButton(6) ? speed : 0d);
+	}
 
 	//	##### Standard #####
 
@@ -192,6 +239,24 @@ public class Robot extends IterativeRobot implements TimeAccessor{
 		this.winchMotor1.enableBrakeMode(state);
 		this.winchMotor2.enableBrakeMode(state);
 	}
+	
+	protected void setDriveCurrentLimit(int amps){
+		this.leftMotor1.setCurrentLimit(amps);
+		this.leftMotor2.setCurrentLimit(amps);
+		this.leftMotor3.setCurrentLimit(amps);
+		this.rightMotor1.setCurrentLimit(amps);
+		this.rightMotor2.setCurrentLimit(amps);
+		this.rightMotor3.setCurrentLimit(amps);
+	}
+	
+	protected void enableDriveCurrentLimit(boolean state){
+		this.leftMotor1.EnableCurrentLimit(state);
+		this.leftMotor2.EnableCurrentLimit(state);
+		this.leftMotor3.EnableCurrentLimit(state);
+		this.rightMotor1.EnableCurrentLimit(state);
+		this.rightMotor2.EnableCurrentLimit(state);
+		this.rightMotor3.EnableCurrentLimit(state);
+	}
 
 	//	##### Input #####
 
@@ -206,17 +271,21 @@ public class Robot extends IterativeRobot implements TimeAccessor{
 	protected boolean getSpeedModifierInput() {
 		return this.driverController.getRawAxis(2) > this.TRIGGER_THRESHOLD;
 	}
-
+	
 	protected boolean getGearPlaceInput(){
-		return this.manipulatorController.getRawButton(1);
+		return this.SINGLE_CONTROLLER_MODE ? this.driverController.getRawButton(1) : this.manipulatorController.getRawButton(1);
+	}
+	
+	protected boolean getPulseGearPlaceInput(){
+		return this.SINGLE_CONTROLLER_MODE ? this.driverController.getRawButton(2) : this.manipulatorController.getRawButton(2);
 	}
 
 	protected boolean getSlowWinchInput() {
-		return this.manipulatorController.getRawButton(6);
+		return this.SINGLE_CONTROLLER_MODE ? this.driverController.getRawButton(6) : this.manipulatorController.getRawButton(6);
 	}
 	
 	protected boolean getFastWinchInput() {
-		return this.manipulatorController.getRawAxis(3) > this.TRIGGER_THRESHOLD;
+		return this.SINGLE_CONTROLLER_MODE ? this.driverController.getRawAxis(3) > this.TRIGGER_THRESHOLD : this.manipulatorController.getRawAxis(3) > this.TRIGGER_THRESHOLD;
 	}
 	
 	@Override
@@ -228,7 +297,7 @@ public class Robot extends IterativeRobot implements TimeAccessor{
 
 	//	##### Computer Vision #####
 
-	private void pixyInit() {
+	protected void pixyInit() {
 		this.pixySerialPort = new SerialPort(9600, edu.wpi.first.wpilibj.SerialPort.Port.kUSB1);
 		this.pixyBuffer = "";
 		this.pixyOutputAngle = null;
@@ -266,11 +335,11 @@ public class Robot extends IterativeRobot implements TimeAccessor{
 		this.pixyThread.start();
 	}
 
-	public void pixyReadSerialPort(){
+	protected void pixyReadSerialPort(){
 		this.pixyBuffer += this.pixySerialPort.readString();
 	}
 
-	public String pixyNextLine(){
+	protected String pixyNextLine(){
 		if(this.pixyBuffer.indexOf("\n") == -1){
 			return null;
 		}
@@ -279,7 +348,7 @@ public class Robot extends IterativeRobot implements TimeAccessor{
 		return out;
 	}
 
-	public boolean pixyIsLineAvalible(){
+	protected boolean pixyIsLineAvalible(){
 		return this.pixyBuffer.contains("\n");
 	}
 
@@ -328,7 +397,6 @@ public class Robot extends IterativeRobot implements TimeAccessor{
 
 			@Override
 			public PIDSourceType getPIDSourceType() {
-				// TODO Auto-generated method stub
 				return PIDSourceType.kDisplacement;
 			}
 		};
@@ -383,6 +451,27 @@ public class Robot extends IterativeRobot implements TimeAccessor{
 			}
 		};
 		
+		this.autoNoPressure = new State() {
+			
+			@Override
+			protected void periodic() {
+				
+				
+			}
+			
+			@Override
+			protected void exit() {
+				
+				
+			}
+			
+			@Override
+			protected void enter() {
+				
+				
+			}
+		};
+		
 		autoPlaceGear1 = new State() {
 			
 			@Override
@@ -399,7 +488,6 @@ public class Robot extends IterativeRobot implements TimeAccessor{
 			
 			@Override
 			protected void enter() {
-				// TODO Auto-generated method stub
 				
 			}
 		};
@@ -408,7 +496,7 @@ public class Robot extends IterativeRobot implements TimeAccessor{
 			
 			@Override
 			protected void periodic() {
-				// TODO Auto-generated method stub
+				gearSolenoid.set(((long)(this.getStateMachine().getCurrentStateLog().getUpdateCount()/2) % 4)!=0);
 				
 			}
 			
@@ -420,7 +508,6 @@ public class Robot extends IterativeRobot implements TimeAccessor{
 			
 			@Override
 			protected void enter() {
-				gearSolenoid.set(true);
 				
 			}
 		};
@@ -441,7 +528,6 @@ public class Robot extends IterativeRobot implements TimeAccessor{
 			
 			@Override
 			protected void enter() {
-				// TODO Auto-generated method stub
 				
 			}
 		};
@@ -457,44 +543,49 @@ public class Robot extends IterativeRobot implements TimeAccessor{
 			
 			@Override
 			protected void exit() {
-				// TODO Auto-generated method stub
 				
 			}
 			
 			@Override
 			protected void enter() {
-				// TODO Auto-generated method stub
 				
 			}
 		};
 		
 		this.autoStateMachine.addState(autoCenter1);
+		this.autoStateMachine.addState(this.autoNoPressure);
 		this.autoStateMachine.addState(autoPlaceGear1);
 		this.autoStateMachine.addState(autoPlaceGear2);
 		this.autoStateMachine.addState(autoPlaceGear3);
 		this.autoStateMachine.addState(noState);
 		
-		this.autoStateMachine.addTransition(new Transition(new SingleStateSelector(autoCenter1), autoPlaceGear1) {
+		this.autoHitWall = new Transition(new SingleStateSelector(autoCenter1), autoPlaceGear1) {
 			
 			@Override
 			public Boolean conditionMet() {
 				
 				return (leftEncoder.getRate() == 0.0d) && (this.getStateMachine().getCurrentStateLog().getEntranceTime() + 1000 < getTime());
 			}
+		};
+		this.autoStateMachine.addTransition(this.autoHitWall);
+		this.autoStateMachine.addTransition(new Transition(new SingleStateSelector(this.autoNoPressure), this.autoPlaceGear1) {
+			
+			@Override
+			public Boolean conditionMet() {
+				return autoStartTime + 8000 < getTime();
+			}
 		});
 		this.autoStateMachine.addTransition(new TimeTransition(new SingleStateSelector(autoPlaceGear1), autoPlaceGear2, 100l));
-		this.autoStateMachine.addTransition(new TimeTransition(new SingleStateSelector(autoPlaceGear2), autoPlaceGear3, 1000l));
+		this.autoStateMachine.addTransition(new TimeTransition(new SingleStateSelector(autoPlaceGear2), autoPlaceGear3, 1500l));
 		this.autoStateMachine.addTransition(new TimeTransition(new SingleStateSelector(autoPlaceGear3), noState, 300l));
 		this.autoStateMachine.addTransition(new Transition(new AllStatesSelector(this.autoStateMachine), noState) {
 			
 			@Override
 			public Boolean conditionMet() {
-				return autoStartTime + 6000 < getTime();
+				return autoStartTime + 14000 < getTime();
 			}
 		});
 	}
-	
-	
 
 
 }
